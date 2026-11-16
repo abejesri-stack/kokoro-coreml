@@ -1,3 +1,6 @@
+// Modified for leaf (Nov 2026): exposes the predicted duration of each input
+// token, so apps can time words. See the `leaf` branch history.
+
 import KokoroPipeline
 
 /// What the last synthesis ran and how long each stage took, one entry per
@@ -20,6 +23,8 @@ public struct KokoroSynthesisReport: Sendable {
         public let stageMilliseconds: [(name: String, ms: Double)]
         /// Wall time of the whole chunk in milliseconds.
         public let totalMilliseconds: Double
+        /// Predicted duration per input token, in duration frames (leaf patch).
+        public let tokenDurationFrames: [Int]
 
         init(_ result: SynthesisResult) {
             let t = result.timings
@@ -33,6 +38,7 @@ public struct KokoroSynthesisReport: Sendable {
                 ("pad", t.padding), ("decoder_pre", t.decoderPre), ("hnsf", t.hnsfSwift), ("generator", t.generatorCoreML),
             ].map { ($0.0, $0.1 * 1000) }
             totalMilliseconds = result.wallTimeSeconds * 1000
+            tokenDurationFrames = result.tokenDurationFrames
         }
     }
 
