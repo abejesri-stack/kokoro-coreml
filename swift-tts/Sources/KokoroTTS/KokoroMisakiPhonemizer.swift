@@ -1,5 +1,11 @@
+// Modified for leaf (Nov 2026): Misaki pinned to the CPU with MLX compiling
+// off, a fallback for the article "a" without iOS's grammar model, and
+// hyphenated words split before Misaki. See the `leaf` branch history.
+
 import Foundation
+import MLX
 import MisakiSwift
+import NaturalLanguage
 
 /// MisakiSwift-backed English phonemizer used by the raw-text SDK.
 ///
@@ -72,16 +78,63 @@ public final class KokoroMisakiPhonemizer: KokoroPhonemizer {
         if let cachedG2P {
             g2p = cachedG2P
         } else {
-            g2p = EnglishG2P(british: british)
+            // Misaki is the only MLX user, so make the CPU MLX's *global*
+            // default. The task-local default below is not enough: MLX also
+            // reads the global one to place each eval's synchronizer and to
+            // decide whether to compile, and iOS refuses GPU work while the
+            // app is inactive (Control Center, lock). iOS builds of MLX cannot
+            // compile for the CPU (BART's `gelu` threw there), so run uncompiled.
+            _ = Self.pinMLXToCPU
+            g2p = Device.withDefaultDevice(.cpu) { EnglishG2P(british: british) }
             cachedG2P = g2p
         }
-        let result = g2p.phonemize(text: text)
+        // CPU only: iOS refuses GPU work while the app is in the background
+        // (locked-screen narration), and MLX aborts the whole process when a
+        // Metal command buffer fails. The BART fallback is small enough for CPU.
+        let spoken = Self.splitHyphenatedWords(text)
+        let result = Device.withDefaultDevice(.cpu) { g2p.phonemize(text: spoken) }
         let droppedTokens = result.1.reduce(into: 0) { total, token in
             if Self.isDroppedToken(text: token.text, phonemes: token.phonemes) {
                 total += 1
             }
         }
-        return (result.0, droppedTokens)
+        var phonemes = result.0
+        if !Self.hasLexicalTags { phonemes = Self.reduceBareArticles(phonemes) }
+        return (phonemes, droppedTokens)
+    }
+
+    /// Runs once per process.
+    private static let pinMLXToCPU: Void = {
+        Device.setDefault(device: .cpu)
+        MLX.compile(enable: false)
+    }()
+
+    /// Whether iOS can tag parts of speech. Without its on-demand English model
+    /// NLTagger tags every word "Other", so Misaki never sees a determiner and
+    /// voices the article "a" as the letter name "ay" (`ˈA`).
+    static var hasLexicalTags: Bool {
+        NLTagger.availableTagSchemes(for: .word, language: .english).contains(.lexicalClass)
+    }
+
+    /// Fallback for untagged text: a standalone `A` word is the
+    /// article, so give it Misaki's article vowel `ɐ`. A bare letter A
+    /// ("Plan A") also becomes "uh"; rare in books.
+    static func reduceBareArticles(_ phonemes: String) -> String {
+        phonemes.replacingOccurrences(of: bareArticlePattern, with: "ɐ", options: .regularExpression)
+    }
+
+    /// `A`, optionally stressed, standing alone between spaces, quotes,
+    /// brackets, dashes or punctuation.
+    static let bareArticlePattern = #"(?<=^|[\s“"‘'(\[—–-])[ˈˌ]?A(?=$|[\s,.;:!?”"’')\]—–-])"#
+
+    /// "well-known" → "well known". Apple's tagger labels an inner hyphen as a
+    /// dash, so Misaki voiced it as `—`: Kokoro then drew out the word before
+    /// it and paused after it ("twenty—four—hour"). Upstream Misaki uses
+    /// spaCy, which tags it as a hyphen rather than a dash. Spaces give the
+    /// normal gap between words. Number ranges ("1914-18") and real dashes are
+    /// untouched.
+    static func splitHyphenatedWords(_ text: String) -> String {
+        text.replacingOccurrences(of: #"(?<=\p{L})[-\u2010\u2011](?=\p{L})"#, with: " ", options: .regularExpression)
     }
 
     /// Returns whether one Misaki token lost the word it stood for.
